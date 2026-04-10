@@ -12,22 +12,45 @@ from utils.helpers import parse_buttons
 
 logger = logging.getLogger(__name__)
 
-async def send_to_groups(bot: Bot, groups: list, data: dict, delay: float = 0.3):
+async def send_to_groups(bot: Bot, groups: list, data: dict, delay: float = 0.5):
+    import os
+    from database.db import get_session
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
     sent = failed = 0
+
+    session_row = await get_session()
+    if not session_row:
+        logger.warning("No session found, skipping broadcast")
+        return 0, len(groups)
+
+    api_id   = int(os.environ.get("API_ID", "0"))
+    api_hash = os.environ.get("API_HASH", "")
+
+    try:
+        client = TelegramClient(StringSession(session_row[0]), api_id, api_hash)
+        await client.connect()
+    except Exception as e:
+        logger.error(f"Telethon connect error: {e}")
+        return 0, len(groups)
+
     for group_id, title in groups:
         try:
-            kwargs = {"reply_markup": data.get("buttons")}
+            text = data.get("text", "")
             if data.get("photo"):
-                await bot.send_photo(group_id, data["photo"], caption=data.get("text", ""), **kwargs)
+                await client.send_file(int(group_id), data["photo"], caption=text)
             elif data.get("video"):
-                await bot.send_video(group_id, data["video"], caption=data.get("text", ""), **kwargs)
+                await client.send_file(int(group_id), data["video"], caption=text)
             else:
-                await bot.send_message(group_id, data["text"], parse_mode="HTML", **kwargs)
+                await client.send_message(int(group_id), text, parse_mode="html")
             sent += 1
         except Exception as e:
-            logger.warning(f"Failed to send to {group_id}: {e}")
+            logger.warning(f"Failed to send to {group_id} ({title}): {e}")
             failed += 1
         await asyncio.sleep(delay)
+
+    await client.disconnect()
     return sent, failed
 
 async def run_scheduler(bot: Bot):
