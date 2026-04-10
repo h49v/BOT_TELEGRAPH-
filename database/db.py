@@ -66,9 +66,19 @@ async def init_db():
                 template_name TEXT,
                 schedule_time TEXT,
                 repeat_interval INTEGER DEFAULT 0,
-                active INTEGER DEFAULT 1
+                active INTEGER DEFAULT 1,
+                msg_count INTEGER DEFAULT 0,
+                msg_delay INTEGER DEFAULT 30
             )
         """)
+        try:
+            await db.execute("ALTER TABLE scheduled_broadcasts ADD COLUMN msg_count INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE scheduled_broadcasts ADD COLUMN msg_delay INTEGER DEFAULT 30")
+        except Exception:
+            pass
         await db.execute("""
             CREATE TABLE IF NOT EXISTS userbot_sessions (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -277,11 +287,11 @@ async def get_scheduled():
         async with db.execute("SELECT * FROM scheduled_broadcasts WHERE active=1") as cur:
             return await cur.fetchall()
 
-async def add_scheduled(template_name: str, schedule_time: str, repeat_interval: int = 0):
+async def add_scheduled(template_name: str, schedule_time: str, repeat_interval: int = 0, msg_count: int = 0, msg_delay: int = 30):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO scheduled_broadcasts (template_name, schedule_time, repeat_interval) VALUES (?,?,?)",
-            (template_name, schedule_time, repeat_interval)
+            "INSERT INTO scheduled_broadcasts (template_name, schedule_time, repeat_interval, msg_count, msg_delay) VALUES (?,?,?,?,?)",
+            (template_name, schedule_time, repeat_interval, msg_count, msg_delay)
         )
         await db.commit()
 
