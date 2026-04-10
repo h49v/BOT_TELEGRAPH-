@@ -84,10 +84,6 @@ async def run_scheduler(bot: Bot):
                     logger.warning("No active groups for scheduled broadcast")
                     continue
 
-                # تطبيق حد الرسائل
-                if msg_count and msg_count < len(groups):
-                    groups = groups[:msg_count]
-
                 buttons_markup = parse_buttons(tmpl[5]) if len(tmpl) > 5 and tmpl[5] else None
                 data = {
                     "text":    tmpl[2],
@@ -96,7 +92,16 @@ async def run_scheduler(bot: Bot):
                     "video":   tmpl[3] if tmpl[4] == "video" else None,
                 }
 
-                sent, failed = await send_to_groups(bot, groups, data, delay=msg_delay)
+                sent, failed = 0, 0
+                total_rounds = msg_count if msg_count > 0 else 1
+
+                for round_num in range(total_rounds):
+                    s_count, f_count = await send_to_groups(bot, groups, data, delay=0.5)
+                    sent += s_count
+                    failed += f_count
+                    if round_num < total_rounds - 1:
+                        await asyncio.sleep(msg_delay)
+
                 await log_broadcast(template_name, sent, failed)
                 logger.info(f"✅ Scheduled broadcast done: sent={sent} failed={failed}")
                 logger.info(f"✅ Scheduled broadcast done: sent={sent} failed={failed}")
