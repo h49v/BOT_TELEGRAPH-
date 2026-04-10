@@ -1,5 +1,6 @@
 """
 handlers/sessions.py
+الحل: نبقي الـ client متصل بين send_code و sign_in
 """
 
 import os
@@ -14,6 +15,9 @@ from database.db import save_session, get_session, delete_session, add_group
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+# ─── نحتفظ بالـ client حياً بين الخطوات ──────────────────
+ACTIVE_CLIENTS = {}  # user_id → TelegramClient
 
 class SessionStates(StatesGroup):
     waiting_phone    = State()
@@ -30,6 +34,14 @@ def _get_api():
         return int(api_id), api_hash, None
     except ValueError:
         return None, None, "❌ API_ID يجب أن يكون رقماً."
+
+async def _close_client(user_id: int):
+    client = ACTIVE_CLIENTS.pop(user_id, None)
+    if client:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 def sessions_keyboard(has_session: bool) -> InlineKeyboardMarkup:
     rows = []
@@ -105,6 +117,8 @@ async def cb_session_new(cb: CallbackQuery, state: FSMContext):
     if err:
         await cb.answer(err, show_alert=True)
         return
+    # أغلق أي client قديم
+    await _close_client(cb.from_user.id)
     await state.set_state(SessionStates.waiting_phone)
     await cb.message.edit_text(
         "📱 <b>استخراج جلسة Telethon</b>\n\n"
@@ -139,29 +153,27 @@ async def process_phone(msg: Message, state: FSMContext):
 
     st = await msg.answer("⏳ جاري إرسال كود التحقق...")
     try:
-        # أنشئ client بـ StringSession فارغة
+        # ننشئ client ونبقيه متصلاً
         client = TelegramClient(StringSession(), api_id, api_hash)
         await client.connect()
         result = await client.send_code_request(phone)
 
-        # احفظ الـ session string بعد إرسال الكود
-        session_str = client.session.save()
-        await client.disconnect()
+        # نحفظ الـ client في الذاكرة — لا نقطع الاتصال
+        ACTIVE_CLIENTS[msg.from_user.id] = client
 
         await state.update_data(
             phone=phone,
-            phone_code_hash=result.phone_code_hash,
-            session_str=session_str,
-            api_id=api_id,
-            api_hash=api_hash
+            phone_code_hash=result.phone_code_hash
         )
         await state.set_state(SessionStates.waiting_code)
         await st.edit_text(
-            "✅ تم إرسال الكود على تيليجرام.\n\n"
-            "أرسل الكود (5 أرقام بدون مسافات):",
-            reply_markup=cancel_kb()
+            "✅ <b>تم إرسال الكود على تيليجرام.</b>\n\n"
+            "⚡ أرسل الكود فوراً (صالح دقيقتين فقط):",
+            reply_markup=cancel_kb(),
+            parse_mode="HTML"
         )
     except Exception as e:
+        await _close_client(msg.from_user.id)
         await st.edit_text(f"❌ خطأ: <code>{e}</code>", parse_mode="HTML")
         await state.clear()
 
@@ -169,32 +181,26 @@ async def process_phone(msg: Message, state: FSMContext):
 async def process_code(msg: Message, state: FSMContext):
     code = msg.text.strip().replace(" ", "")
     data = await state.get_data()
+    user_id = msg.from_user.id
 
-    try:
-        from telethon import TelegramClient
-        from telethon.sessions import StringSession
-    except ImportError:
-        await msg.answer("❌ مكتبة Telethon غير مثبتة.")
+    client = ACTIVE_CLIENTS.get(user_id)
+    if not client:
+        await msg.answer(
+            "❌ انتهت الجلسة، ابدأ من جديد.",
+            reply_markup=cancel_kb()
+        )
         await state.clear()
         return
 
-    st = await msg.answer("⏳ جاري التحقق من الكود...")
+    st = await msg.answer("⏳ جاري التحقق...")
     try:
-        # أعد فتح نفس الـ session المحفوظة
-        client = TelegramClient(
-            StringSession(data["session_str"]),
-            data["api_id"],
-            data["api_hash"]
-        )
-        await client.connect()
         await client.sign_in(
             phone=data["phone"],
             code=code,
             phone_code_hash=data["phone_code_hash"]
         )
-        # نجح تسجيل الدخول
         final_session = client.session.save()
-        await client.disconnect()
+        await _close_client(user_id)
         await save_session(final_session)
         await state.clear()
         await st.edit_text(
@@ -205,54 +211,36 @@ async def process_code(msg: Message, state: FSMContext):
     except Exception as e:
         err_str = str(e)
         if "password" in err_str.lower() or "two-steps" in err_str.lower():
-            # احفظ الـ session الحالية للخطوة التالية
-            try:
-                session_now = client.session.save()
-                await client.disconnect()
-            except Exception:
-                session_now = data["session_str"]
-            await state.update_data(session_str=session_now)
             await state.set_state(SessionStates.waiting_password)
             await st.edit_text(
                 "🔐 حسابك محمي بكلمة مرور ثنائية.\nأرسل كلمة المرور:",
                 reply_markup=cancel_kb()
             )
         else:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            await _close_client(user_id)
             await st.edit_text(f"❌ فشل: <code>{e}</code>", parse_mode="HTML")
             await state.clear()
 
 @router.message(SessionStates.waiting_password)
 async def process_password(msg: Message, state: FSMContext):
     password = msg.text.strip()
-    data = await state.get_data()
+    user_id  = msg.from_user.id
     try:
         await msg.delete()
     except Exception:
         pass
 
-    try:
-        from telethon import TelegramClient
-        from telethon.sessions import StringSession
-    except ImportError:
-        await msg.answer("❌ مكتبة Telethon غير مثبتة.")
+    client = ACTIVE_CLIENTS.get(user_id)
+    if not client:
+        await msg.answer("❌ انتهت الجلسة، ابدأ من جديد.")
         await state.clear()
         return
 
     st = await msg.answer("⏳ جاري التحقق...")
     try:
-        client = TelegramClient(
-            StringSession(data["session_str"]),
-            data["api_id"],
-            data["api_hash"]
-        )
-        await client.connect()
         await client.sign_in(password=password)
         final_session = client.session.save()
-        await client.disconnect()
+        await _close_client(user_id)
         await save_session(final_session)
         await state.clear()
         await st.edit_text(
@@ -261,10 +249,7 @@ async def process_password(msg: Message, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception as e:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _close_client(user_id)
         await st.edit_text(f"❌ كلمة المرور خاطئة: <code>{e}</code>", parse_mode="HTML")
         await state.clear()
 
@@ -311,14 +296,13 @@ async def process_group_userbot(msg: Message, state: FSMContext):
         return
 
     st = await msg.answer("⏳ جاري جلب معلومات الكروب...")
+    client = None
     try:
         client = TelegramClient(StringSession(row[0]), api_id, api_hash)
         await client.connect()
         entity   = await client.get_entity(text)
         group_id = entity.id
         title    = getattr(entity, "title", str(group_id))
-        await client.disconnect()
-
         if not str(group_id).startswith("-100"):
             group_id = int(f"-100{group_id}")
         await add_group(group_id, title)
@@ -327,8 +311,10 @@ async def process_group_userbot(msg: Message, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception as e:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
         await st.edit_text(f"❌ فشل: <code>{e}</code>", parse_mode="HTML")
+    finally:
+        if client:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
