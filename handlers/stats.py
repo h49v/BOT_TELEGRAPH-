@@ -1,14 +1,14 @@
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from utils.helpers import is_admin, back_button
+from utils.helpers import is_admin, is_feature_allowed, back_button
 from database.db import get_stats
 
 router = Router()
 
 @router.callback_query(F.data == "stats_menu")
 async def cb_stats(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "stats_view"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     s = await get_stats()
     text = (
