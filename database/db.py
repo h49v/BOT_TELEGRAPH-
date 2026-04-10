@@ -3,6 +3,9 @@ import os
 
 DB_PATH = os.environ.get("DB_PATH", "cyberband.db")
 
+# الوظائف القابلة للتفعيل/التعطيل
+FEATURES = ["broadcast", "templates", "auto_reply", "groups_view", "stats_view"]
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -28,6 +31,7 @@ async def init_db():
                 content TEXT,
                 media_path TEXT,
                 media_type TEXT,
+                buttons TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -72,6 +76,19 @@ async def init_db():
                 saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # جدول الوظائف المفتوحة للعموم
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS feature_flags (
+                feature TEXT PRIMARY KEY,
+                enabled INTEGER DEFAULT 0
+            )
+        """)
+        # إضافة الوظائف الافتراضية (كلها مغلقة بالبداية)
+        for feature in FEATURES:
+            await db.execute(
+                "INSERT OR IGNORE INTO feature_flags (feature, enabled) VALUES (?, 0)",
+                (feature,)
+            )
         # Insert main admin from env
         main_admin = int(os.environ.get("MAIN_ADMIN_ID", 0))
         if main_admin:
@@ -137,19 +154,21 @@ async def toggle_group(group_id: int, active: int):
 # ─── Templates ────────────────────────────────────────────
 async def get_all_templates():
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, name, content, media_type FROM templates") as cur:
+        async with db.execute("SELECT id, name, content, media_type, buttons FROM templates") as cur:
             return await cur.fetchall()
 
 async def get_template(name: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT * FROM templates WHERE name=?", (name,)) as cur:
+        async with db.execute(
+            "SELECT id, name, content, media_path, media_type, buttons FROM templates WHERE name=?", (name,)
+        ) as cur:
             return await cur.fetchone()
 
-async def add_template(name: str, content: str, media_path: str = None, media_type: str = None):
+async def add_template(name: str, content: str, media_path: str = None, media_type: str = None, buttons: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO templates (name, content, media_path, media_type) VALUES (?,?,?,?)",
-            (name, content, media_path, media_type)
+            "INSERT OR REPLACE INTO templates (name, content, media_path, media_type, buttons) VALUES (?,?,?,?,?)",
+            (name, content, media_path, media_type, buttons)
         )
         await db.commit()
 
@@ -272,18 +291,6 @@ async def remove_scheduled(schedule_id: int):
         await db.commit()
 
 # ─── Userbot Sessions ─────────────────────────────────────
-async def init_sessions_table():
-    """يُستدعى من init_db تلقائياً"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS userbot_sessions (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                session_string TEXT NOT NULL,
-                saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.commit()
-
 async def save_session(session_string: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -301,3 +308,26 @@ async def delete_session():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM userbot_sessions WHERE id=1")
         await db.commit()
+
+# ─── Feature Flags ────────────────────────────────────────
+async def is_feature_enabled(feature: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT enabled FROM feature_flags WHERE feature=?", (feature,)
+        ) as cur:
+            row = await cur.fetchone()
+            return bool(row and row[0])
+
+async def set_feature(feature: str, enabled: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO feature_flags (feature, enabled) VALUES (?, ?)",
+            (feature, int(enabled))
+        )
+        await db.commit()
+
+async def get_all_features() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT feature, enabled FROM feature_flags") as cur:
+            rows = await cur.fetchall()
+            return {r[0]: bool(r[1]) for r in rows}
