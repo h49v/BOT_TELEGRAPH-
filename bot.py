@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from handlers import admin, groups, broadcast, auto_reply, stats, backup, sessions
 from database.db import init_db
+from scheduler import run_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,8 +19,6 @@ async def main():
     bot = Bot(token=os.environ["BOT_TOKEN"])
     dp  = Dispatcher(storage=MemoryStorage())
 
-    # الترتيب مهم — sessions قبل groups لأن session_add_group
-    # يُعالَج في sessions.py
     dp.include_router(admin.router)
     dp.include_router(sessions.router)
     dp.include_router(groups.router)
@@ -27,6 +26,9 @@ async def main():
     dp.include_router(auto_reply.router)
     dp.include_router(stats.router)
     dp.include_router(backup.router)
+
+    # شغّل الـ scheduler في الخلفية
+    asyncio.create_task(run_scheduler(bot))
 
     logger.info("🤖 CyberBand Bot starting...")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
