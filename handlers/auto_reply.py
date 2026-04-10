@@ -1,13 +1,20 @@
 import os
 import json
+import time
+from collections import defaultdict
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from utils.helpers import is_admin, is_feature_allowed, back_button, parse_buttons
-from database.db import get_all_replies, get_reply_by_keyword, add_reply, delete_reply, toggle_reply, is_blacklisted
+from database.db import get_all_replies, get_reply_by_keyword, add_reply, delete_reply, toggle_reply, is_blacklisted, add_blacklist
 
 router = Router()
+
+# ─── Rate Limiting (6 رسائل ثم حظر تلقائي) ───────────────
+MSG_LIMIT = 6
+MSG_WINDOW = 60  # ثانية
+_user_msg_log: dict = defaultdict(list)
 
 class ReplyStates(StatesGroup):
     waiting_keyword = State()
@@ -129,23 +136,57 @@ async def cb_confirm_del_reply(cb: CallbackQuery):
 @router.message(F.chat.type == "private")
 async def handle_private_message(msg: Message, bot: Bot):
     user_id = msg.from_user.id
-    
+
+    # الأدمن: نفحص الردود التلقائية بس ما نفوردر
     if await is_admin(user_id):
+        text = msg.text or msg.caption or ""
+        if text:
+            replies = await get_all_replies()
+            for r in replies:
+                if r[4] and r[1].lower() in text.lower():
+                    buttons_markup = parse_buttons(r[3]) if r[3] else None
+                    await msg.answer(r[2], reply_markup=buttons_markup, parse_mode="HTML")
+                    break
         return
-    
+
     if await is_blacklisted(user_id):
         await msg.answer("⛔ أنت محظور من استخدام هذا البوت.")
         return
-    
+
+    # ─── فحص عدد الرسائل (حظر تلقائي بعد 6) ─────────────
+    now = time.time()
+    timestamps = _user_msg_log[user_id]
+    # احذف الرسائل القديمة خارج النافذة الزمنية
+    _user_msg_log[user_id] = [t for t in timestamps if now - t < MSG_WINDOW]
+    _user_msg_log[user_id].append(now)
+
+    if len(_user_msg_log[user_id]) > MSG_LIMIT:
+        # حظر تلقائي
+        await add_blacklist(user_id)
+        _user_msg_log.pop(user_id, None)
+        await msg.answer("⛔ تم حظرك بسبب إرسال رسائل كثيرة.")
+        if ADMIN_GROUP_ID:
+            username = f"@{msg.from_user.username}" if msg.from_user.username else "بدون يوزر"
+            await bot.send_message(
+                ADMIN_GROUP_ID,
+                f"🚫 <b>تم حظر مستخدم تلقائياً (تجاوز الحد)</b>\n"
+                f"👤 {msg.from_user.full_name} | {username}\n"
+                f"🆔 <code>{user_id}</code>",
+                parse_mode="HTML"
+            )
+        return
+
     text = msg.text or msg.caption or ""
-    
+
+    # فحص الردود التلقائية
     replies = await get_all_replies()
     for r in replies:
         if r[4] and r[1].lower() in text.lower():
             buttons_markup = parse_buttons(r[3]) if r[3] else None
             await msg.answer(r[2], reply_markup=buttons_markup, parse_mode="HTML")
             break
-    
+
+    # فوردر للأدمن دايماً + زر إيقاف المحادثة
     if ADMIN_GROUP_ID:
         username = f"@{msg.from_user.username}" if msg.from_user.username else "بدون يوزر"
         header = (
@@ -153,14 +194,40 @@ async def handle_private_message(msg: Message, bot: Bot):
             f"👤 {msg.from_user.full_name} | {username}\n"
             f"🆔 <code>{user_id}</code>"
         )
-        view_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="👁 مشاهدة المحادثة", url=f"tg://user?id={user_id}")
-        ]])
+        view_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 مشاهدة المحادثة", url=f"tg://user?id={user_id}")],
+            [InlineKeyboardButton(text="🚫 حظر المستخدم", callback_data=f"block_user_{user_id}")]
+        ])
         try:
             await bot.send_message(ADMIN_GROUP_ID, header, parse_mode="HTML", reply_markup=view_kb)
             await bot.forward_message(ADMIN_GROUP_ID, msg.chat.id, msg.message_id)
         except Exception:
             pass
+
+# ─── زر حظر من الأدمن جروب ───────────────────────────────
+@router.callback_query(F.data.startswith("block_user_"))
+async def cb_block_user(cb: CallbackQuery, bot: Bot):
+    if not await is_admin(cb.from_user.id):
+        await cb.answer("⛔", show_alert=True)
+        return
+    user_id = int(cb.data.split("_")[2])
+    await add_blacklist(user_id)
+    _user_msg_log.pop(user_id, None)
+    await cb.answer("✅ تم الحظر", show_alert=True)
+    # عدّل الرسالة وأزل الزر
+    try:
+        new_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👁 مشاهدة المحادثة", url=f"tg://user?id={user_id}")],
+            [InlineKeyboardButton(text="✅ محظور", callback_data="noop")]
+        ])
+        await cb.message.edit_reply_markup(reply_markup=new_kb)
+        await bot.send_message(user_id, "⛔ تم حظرك من استخدام هذا البوت.")
+    except Exception:
+        pass
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(cb: CallbackQuery):
+    await cb.answer()
 
 # ─── Auto Reply in Groups ─────────────────────────────────
 @router.message(F.chat.type.in_({"group", "supergroup"}))
