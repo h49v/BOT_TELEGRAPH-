@@ -4,7 +4,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from utils.helpers import is_admin, back_button, parse_buttons
+from utils.helpers import is_admin, is_feature_allowed, back_button, parse_buttons
 from database.db import get_all_replies, get_reply_by_keyword, add_reply, delete_reply, toggle_reply, is_blacklisted
 
 router = Router()
@@ -13,9 +13,8 @@ class ReplyStates(StatesGroup):
     waiting_keyword = State()
     waiting_reply_text = State()
     waiting_reply_buttons = State()
-    waiting_delete_keyword = State()
 
-ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", 0))
+ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID") or 0)
 
 # ─── Auto Reply Menu ──────────────────────────────────────
 def replies_menu_kb() -> InlineKeyboardMarkup:
@@ -28,16 +27,16 @@ def replies_menu_kb() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data == "autoreplies_menu")
 async def cb_autoreplies_menu(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "auto_reply"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     await cb.message.edit_text("🤖 <b>الردود التلقائية:</b>", reply_markup=replies_menu_kb(), parse_mode="HTML")
 
 # ─── List Replies ─────────────────────────────────────────
 @router.callback_query(F.data == "list_replies")
 async def cb_list_replies(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "auto_reply"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     replies = await get_all_replies()
     if not replies:
