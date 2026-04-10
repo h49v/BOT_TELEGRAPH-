@@ -6,6 +6,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import StateFilter
 from utils.helpers import is_admin, is_feature_allowed, back_button, parse_buttons
 from database.db import get_all_replies, get_reply_by_keyword, add_reply, delete_reply, toggle_reply, is_blacklisted, add_blacklist
 
@@ -16,12 +17,40 @@ MSG_LIMIT = 6
 MSG_WINDOW = 60  # ثانية
 _user_msg_log: dict = defaultdict(list)
 
+# ─── تتبع المستخدمين الذين وصلتهم رسالة الترحيب ──────────
+_welcomed_users: set = set()
+
 class ReplyStates(StatesGroup):
     waiting_keyword = State()
     waiting_reply_text = State()
     waiting_reply_buttons = State()
+    waiting_welcome_text = State()   # ← جديد: تعديل رسالة الترحيب
 
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID") or 0)
+
+# ─── رسالة الترحيب الافتراضية (قابلة للتعديل من البوت) ────
+# المتغيرات المتاحة: {name} = اسم المستخدم
+_WELCOME_TEXT_FILE = "welcome_message.txt"
+
+DEFAULT_WELCOME = (
+    "👋 أهلاً وسهلاً {name}!\n\n"
+    "⏳ انتظر شوي، موجود قريباً.\n\n"
+    "📢 قناتي: @YOUR_CHANNEL\n"
+    "👤 يوزري: @YOUR_USERNAME"
+)
+
+def load_welcome_text() -> str:
+    try:
+        if os.path.exists(_WELCOME_TEXT_FILE):
+            with open(_WELCOME_TEXT_FILE, "r", encoding="utf-8") as f:
+                return f.read()
+    except Exception:
+        pass
+    return DEFAULT_WELCOME
+
+def save_welcome_text(text: str):
+    with open(_WELCOME_TEXT_FILE, "w", encoding="utf-8") as f:
+        f.write(text)
 
 # ─── Auto Reply Menu ──────────────────────────────────────
 def replies_menu_kb() -> InlineKeyboardMarkup:
@@ -29,6 +58,8 @@ def replies_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📋 عرض الردود", callback_data="list_replies")],
         [InlineKeyboardButton(text="➕ إضافة رد", callback_data="add_reply")],
         [InlineKeyboardButton(text="🗑 حذف رد", callback_data="delete_reply")],
+        [InlineKeyboardButton(text="✏️ تعديل رسالة الترحيب", callback_data="edit_welcome_msg")],
+        [InlineKeyboardButton(text="👁 معاينة رسالة الترحيب", callback_data="preview_welcome_msg")],
         [InlineKeyboardButton(text="🔙 رجوع", callback_data="main_menu")],
     ])
 
@@ -132,13 +163,55 @@ async def cb_confirm_del_reply(cb: CallbackQuery):
     await cb.answer(f"✅ تم حذف رد '{keyword}'")
     await cb_delete_reply_menu(cb)
 
+# ─── تعديل رسالة الترحيب ─────────────────────────────────
+@router.callback_query(F.data == "edit_welcome_msg")
+async def cb_edit_welcome(cb: CallbackQuery, state: FSMContext):
+    if not await is_admin(cb.from_user.id):
+        await cb.answer("⛔", show_alert=True)
+        return
+    current = load_welcome_text()
+    await state.set_state(ReplyStates.waiting_welcome_text)
+    await cb.message.edit_text(
+        "✏️ <b>تعديل رسالة الترحيب</b>\n\n"
+        "أرسل الصيغة الجديدة. يمكنك استخدام:\n"
+        "• <code>{name}</code> = اسم المستخدم\n\n"
+        "📄 <b>الصيغة الحالية:</b>\n"
+        f"<code>{current}</code>",
+        reply_markup=back_button("autoreplies_menu"),
+        parse_mode="HTML"
+    )
+
+@router.message(ReplyStates.waiting_welcome_text)
+async def process_welcome_text(msg: Message, state: FSMContext):
+    save_welcome_text(msg.text.strip())
+    await state.clear()
+    await msg.answer(
+        "✅ <b>تم حفظ رسالة الترحيب الجديدة!</b>\n\n"
+        f"<code>{msg.text.strip()}</code>",
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "preview_welcome_msg")
+async def cb_preview_welcome(cb: CallbackQuery):
+    if not await is_admin(cb.from_user.id):
+        await cb.answer("⛔", show_alert=True)
+        return
+    text = load_welcome_text()
+    preview = text.format(name=cb.from_user.first_name)
+    await cb.message.edit_text(
+        f"👁 <b>معاينة رسالة الترحيب:</b>\n\n{preview}",
+        reply_markup=back_button("autoreplies_menu"),
+        parse_mode="HTML"
+    )
+
 # ─── Handle Incoming User Messages (Auto Reply + Forward) ─
-@router.message(F.chat.type == "private")
-async def handle_private_message(msg: Message, bot: Bot):
+@router.message(F.chat.type == "private", StateFilter(None))
+async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
     user_id = msg.from_user.id
 
-    # الأدمن: نفحص الردود التلقائية بس ما نفوردر
-    if await is_admin(user_id):
+    # الأدمن: إذا في state نشط (FSM) لا نتدخل — خلّي الـ handler المختص يشتغل
+    current_state = await state.get_state()
+    if await is_admin(user_id) and current_state is None:
         text = msg.text or msg.caption or ""
         if text:
             replies = await get_all_replies()
@@ -177,6 +250,16 @@ async def handle_private_message(msg: Message, bot: Bot):
         return
 
     text = msg.text or msg.caption or ""
+
+    # ─── رسالة الترحيب (مرة واحدة فقط لكل مستخدم) ────────
+    if user_id not in _welcomed_users:
+        _welcomed_users.add(user_id)
+        welcome_template = load_welcome_text()
+        welcome_text = welcome_template.format(name=msg.from_user.first_name)
+        try:
+            await msg.answer(welcome_text, parse_mode="HTML")
+        except Exception:
+            await msg.answer(welcome_text)
 
     # فحص الردود التلقائية
     replies = await get_all_replies()
