@@ -65,6 +65,13 @@ async def init_db():
                 active INTEGER DEFAULT 1
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS userbot_sessions (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                session_string TEXT NOT NULL,
+                saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # Insert main admin from env
         main_admin = int(os.environ.get("MAIN_ADMIN_ID", 0))
         if main_admin:
