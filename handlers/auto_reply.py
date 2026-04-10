@@ -24,12 +24,10 @@ class ReplyStates(StatesGroup):
     waiting_keyword = State()
     waiting_reply_text = State()
     waiting_reply_buttons = State()
-    waiting_welcome_text = State()   # ← جديد: تعديل رسالة الترحيب
+    waiting_welcome_text = State()
 
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID") or 0)
 
-# ─── رسالة الترحيب الافتراضية (قابلة للتعديل من البوت) ────
-# المتغيرات المتاحة: {name} = اسم المستخدم
 _WELCOME_TEXT_FILE = "welcome_message.txt"
 
 DEFAULT_WELCOME = (
@@ -70,7 +68,6 @@ async def cb_autoreplies_menu(cb: CallbackQuery):
         return
     await cb.message.edit_text("🤖 <b>الردود التلقائية:</b>", reply_markup=replies_menu_kb(), parse_mode="HTML")
 
-# ─── List Replies ─────────────────────────────────────────
 @router.callback_query(F.data == "list_replies")
 async def cb_list_replies(cb: CallbackQuery):
     if not await is_feature_allowed(cb.from_user.id, "auto_reply"):
@@ -80,7 +77,6 @@ async def cb_list_replies(cb: CallbackQuery):
     if not replies:
         await cb.message.edit_text("📭 لا توجد ردود.", reply_markup=back_button("autoreplies_menu"))
         return
-    
     text = "🤖 <b>الردود التلقائية:</b>\n\n"
     buttons = []
     for r in replies:
@@ -91,7 +87,6 @@ async def cb_list_replies(cb: CallbackQuery):
             callback_data=f"toggle_reply_{r[0]}_{0 if r[4] else 1}"
         )])
     buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="autoreplies_menu")])
-    
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("toggle_reply_"))
@@ -103,17 +98,13 @@ async def cb_toggle_reply(cb: CallbackQuery):
     await cb.answer(f"{'✅ مفعّل' if active else '⛔ معطّل'}")
     await cb_list_replies(cb)
 
-# ─── Add Reply ────────────────────────────────────────────
 @router.callback_query(F.data == "add_reply")
 async def cb_add_reply(cb: CallbackQuery, state: FSMContext):
     if not await is_admin(cb.from_user.id):
         await cb.answer("⛔", show_alert=True)
         return
     await state.set_state(ReplyStates.waiting_keyword)
-    await cb.message.edit_text(
-        "أرسل الكلمة المفتاحية للرد:",
-        reply_markup=back_button("autoreplies_menu")
-    )
+    await cb.message.edit_text("أرسل الكلمة المفتاحية للرد:", reply_markup=back_button("autoreplies_menu"))
 
 @router.message(ReplyStates.waiting_keyword)
 async def process_keyword(msg: Message, state: FSMContext):
@@ -138,12 +129,8 @@ async def process_reply_buttons(msg: Message, state: FSMContext):
     buttons_raw = None if msg.text.strip().lower() in ["تخطي", "skip"] else msg.text.strip()
     await add_reply(data["keyword"], data["reply_text"], buttons_raw)
     await state.clear()
-    await msg.answer(
-        f"✅ تم إضافة الرد على كلمة: <b>{data['keyword']}</b>",
-        parse_mode="HTML"
-    )
+    await msg.answer(f"✅ تم إضافة الرد على كلمة: <b>{data['keyword']}</b>", parse_mode="HTML")
 
-# ─── Delete Reply ─────────────────────────────────────────
 @router.callback_query(F.data == "delete_reply")
 async def cb_delete_reply_menu(cb: CallbackQuery):
     replies = await get_all_replies()
@@ -209,9 +196,7 @@ async def cb_preview_welcome(cb: CallbackQuery):
 async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
     user_id = msg.from_user.id
 
-    # الأدمن: إذا في state نشط (FSM) لا نتدخل — خلّي الـ handler المختص يشتغل
-    current_state = await state.get_state()
-    if await is_admin(user_id) and current_state is None:
+    if await is_admin(user_id):
         text = msg.text or msg.caption or ""
         if text:
             replies = await get_all_replies()
@@ -226,15 +211,11 @@ async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
         await msg.answer("⛔ أنت محظور من استخدام هذا البوت.")
         return
 
-    # ─── فحص عدد الرسائل (حظر تلقائي بعد 6) ─────────────
     now = time.time()
-    timestamps = _user_msg_log[user_id]
-    # احذف الرسائل القديمة خارج النافذة الزمنية
-    _user_msg_log[user_id] = [t for t in timestamps if now - t < MSG_WINDOW]
+    _user_msg_log[user_id] = [t for t in _user_msg_log[user_id] if now - t < MSG_WINDOW]
     _user_msg_log[user_id].append(now)
 
     if len(_user_msg_log[user_id]) > MSG_LIMIT:
-        # حظر تلقائي
         await add_blacklist(user_id)
         _user_msg_log.pop(user_id, None)
         await msg.answer("⛔ تم حظرك بسبب إرسال رسائل كثيرة.")
@@ -242,7 +223,7 @@ async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
             username = f"@{msg.from_user.username}" if msg.from_user.username else "بدون يوزر"
             await bot.send_message(
                 ADMIN_GROUP_ID,
-                f"🚫 <b>تم حظر مستخدم تلقائياً (تجاوز الحد)</b>\n"
+                f"🚫 <b>تم حظر مستخدم تلقائياً</b>\n"
                 f"👤 {msg.from_user.full_name} | {username}\n"
                 f"🆔 <code>{user_id}</code>",
                 parse_mode="HTML"
@@ -251,7 +232,6 @@ async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
 
     text = msg.text or msg.caption or ""
 
-    # ─── رسالة الترحيب (مرة واحدة فقط لكل مستخدم) ────────
     if user_id not in _welcomed_users:
         _welcomed_users.add(user_id)
         welcome_template = load_welcome_text()
@@ -261,7 +241,6 @@ async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
         except Exception:
             await msg.answer(welcome_text)
 
-    # فحص الردود التلقائية
     replies = await get_all_replies()
     for r in replies:
         if r[4] and r[1].lower() in text.lower():
@@ -269,7 +248,6 @@ async def handle_private_message(msg: Message, bot: Bot, state: FSMContext):
             await msg.answer(r[2], reply_markup=buttons_markup, parse_mode="HTML")
             break
 
-    # فوردر للأدمن دايماً + زر إيقاف المحادثة
     if ADMIN_GROUP_ID:
         username = f"@{msg.from_user.username}" if msg.from_user.username else "بدون يوزر"
         header = (
@@ -297,7 +275,6 @@ async def cb_block_user(cb: CallbackQuery, bot: Bot):
     await add_blacklist(user_id)
     _user_msg_log.pop(user_id, None)
     await cb.answer("✅ تم الحظر", show_alert=True)
-    # عدّل الرسالة وأزل الزر
     try:
         new_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👁 مشاهدة المحادثة", url=f"tg://user?id={user_id}")],
@@ -318,7 +295,6 @@ async def handle_group_message(msg: Message, bot: Bot):
     text = msg.text or msg.caption or ""
     if not text:
         return
-    
     replies = await get_all_replies()
     for r in replies:
         if r[4] and r[1].lower() in text.lower():
