@@ -21,6 +21,8 @@ class BroadcastStates(StatesGroup):
     waiting_template_buttons = State()
     waiting_schedule_time    = State()
     waiting_schedule_interval = State()
+    waiting_schedule_count   = State()
+    waiting_schedule_delay   = State()
 
 PENDING_BROADCAST = {}
 
@@ -317,7 +319,9 @@ async def cb_schedule_menu(cb: CallbackQuery):
     scheduled = await get_scheduled()
     text = "⏰ <b>الجدولة:</b>\n\n"
     for s in scheduled:
-        text += f"• <b>{s[1]}</b> | 🕐 {s[2]} | 🔁 {s[3]}د\n"
+        count = s[6] if len(s) > 6 and s[6] else "كل"
+        delay = s[7] if len(s) > 7 and s[7] else 30
+        text += f"• <b>{s[1]}</b> | 🕐 {s[2]} | 📨 {count} رسالة | ⏱ {delay}ث بين كل رسالة\n"
     if not scheduled:
         text += "لا توجد جدولة نشطة."
 
@@ -348,7 +352,7 @@ async def cb_sched_template(cb: CallbackQuery, state: FSMContext):
     await state.update_data(sched_template=name)
     await state.set_state(BroadcastStates.waiting_schedule_time)
     await cb.message.edit_text(
-        "أرسل وقت الإرسال (HH:MM) مثال: <code>14:30</code>",
+        "🕐 أرسل وقت الإرسال (HH:MM) مثال: <code>15:30</code>",
         reply_markup=back_button("schedule_menu"),
         parse_mode="HTML"
     )
@@ -357,12 +361,43 @@ async def cb_sched_template(cb: CallbackQuery, state: FSMContext):
 async def process_schedule_time(msg: Message, state: FSMContext):
     time_str = msg.text.strip()
     if not re.match(r"^\d{2}:\d{2}$", time_str):
-        await msg.answer("❌ صيغة غير صحيحة. أرسل مثل: 14:30")
+        await msg.answer("❌ صيغة غير صحيحة. أرسل مثل: <code>15:30</code>", parse_mode="HTML")
         return
     await state.update_data(sched_time=time_str)
+    await state.set_state(BroadcastStates.waiting_schedule_count)
+    await msg.answer(
+        "📨 كم رسالة تريد ترسل في كل جلسة؟\n"
+        "مثال: <code>200</code>\n"
+        "أو أرسل <code>0</code> لإرسال لكل القروبات",
+        parse_mode="HTML"
+    )
+
+@router.message(BroadcastStates.waiting_schedule_count)
+async def process_schedule_count(msg: Message, state: FSMContext):
+    try:
+        count = int(msg.text.strip())
+    except ValueError:
+        count = 0
+    await state.update_data(sched_count=count)
+    await state.set_state(BroadcastStates.waiting_schedule_delay)
+    await msg.answer(
+        "⏱ كم ثانية بين كل رسالة والثانية؟\n"
+        "مثال: <code>200</code> = 200 ثانية بين كل رسالة",
+        parse_mode="HTML"
+    )
+
+@router.message(BroadcastStates.waiting_schedule_delay)
+async def process_schedule_delay(msg: Message, state: FSMContext):
+    try:
+        delay = int(msg.text.strip())
+        if delay < 5:
+            delay = 5  # حد أدنى 5 ثواني
+    except ValueError:
+        delay = 30
+    await state.update_data(sched_delay=delay)
     await state.set_state(BroadcastStates.waiting_schedule_interval)
     await msg.answer(
-        "أرسل فترة التكرار بالدقائق (0 = مرة واحدة):\n"
+        "🔁 أرسل فترة التكرار بالدقائق (0 = مرة واحدة):\n"
         "مثال: <code>60</code> = كل ساعة",
         parse_mode="HTML"
     )
@@ -375,16 +410,20 @@ async def process_schedule_interval(msg: Message, state: FSMContext):
         interval = 0
     data = await state.get_data()
     await state.clear()
-    await add_scheduled(data["sched_template"], data["sched_time"], interval)
-    # FIX: بناء الرسالة بشكل صحيح بدل ternary داخل f-string
-    if interval:
-        text = (
-            f"✅ تم جدولة <b>{data['sched_template']}</b>\n"
-            f"🕐 الوقت: {data['sched_time']}\n"
-            f"🔁 كل: {interval} دقيقة"
-        )
-    else:
-        text = f"✅ مرة واحدة عند {data['sched_time']}"
+
+    count = data.get("sched_count", 0)
+    delay = data.get("sched_delay", 30)
+
+    await add_scheduled(data["sched_template"], data["sched_time"], interval, count, delay)
+
+    text = (
+        f"✅ <b>تم إنشاء الجدولة</b>\n"
+        f"📋 القالب: <b>{data['sched_template']}</b>\n"
+        f"🕐 الوقت: <b>{data['sched_time']}</b>\n"
+        f"📨 عدد الرسائل: <b>{'كل القروبات' if count == 0 else count}</b>\n"
+        f"⏱ الفاصل: <b>{delay} ثانية</b>\n"
+        f"🔁 التكرار: <b>{'كل ' + str(interval) + ' دقيقة' if interval else 'مرة واحدة'}</b>"
+    )
     await msg.answer(text, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("del_schedule_"))
