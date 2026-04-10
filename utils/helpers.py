@@ -13,24 +13,30 @@ async def is_main_admin(user_id: int) -> bool:
     admin = await get_admin(user_id)
     return admin is not None and admin[2] == "main"
 
+async def is_feature_allowed(user_id: int, feature: str) -> bool:
+    """يرجع True لو المستخدم مشرف، أو الوظيفة مفتوحة للعموم"""
+    from database.db import get_admin, is_feature_enabled, is_blacklisted
+    if await is_blacklisted(user_id):
+        return False
+    if await get_admin(user_id) is not None:
+        return True
+    return await is_feature_enabled(feature)
+
 # ─── Group ID Extractor (Bot API) ─────────────────────────
 async def extract_group_id(bot: Bot, link_or_id: str) -> tuple:
     link_or_id = link_or_id.strip()
-
     if re.match(r"^-?\d+$", link_or_id):
         try:
             chat = await bot.get_chat(int(link_or_id))
             return chat.id, chat.title or str(chat.id)
         except Exception as e:
             return None, f"❌ فشل جلب المجموعة: {e}"
-
     if link_or_id.startswith("@"):
         try:
             chat = await bot.get_chat(link_or_id)
             return chat.id, chat.title or link_or_id
         except Exception as e:
             return None, f"❌ فشل جلب المجموعة: {e}"
-
     match_username = re.search(r"t\.me/([a-zA-Z0-9_]+)$", link_or_id)
     if match_username:
         username = "@" + match_username.group(1)
@@ -39,14 +45,12 @@ async def extract_group_id(bot: Bot, link_or_id: str) -> tuple:
             return chat.id, chat.title or username
         except Exception as e:
             return None, f"❌ فشل جلب المجموعة: {e}"
-
     match_invite = re.search(r"t\.me/\+([a-zA-Z0-9_-]+)", link_or_id)
     if match_invite:
         return None, (
             "⚠️ روابط الدعوة الخاصة تحتاج Userbot.\n"
             "استخدم زر «إضافة كروب عبر Userbot» بدلاً من هذا."
         )
-
     return None, "❌ صيغة غير معروفة. أرسل ID مباشر أو @username أو رابط t.me/username"
 
 # ─── Keyboards ────────────────────────────────────────────
@@ -72,12 +76,10 @@ def back_button(callback: str = "main_menu") -> InlineKeyboardMarkup:
     ])
 
 def confirm_keyboard(yes_cb: str, no_cb: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ نعم", callback_data=yes_cb),
-            InlineKeyboardButton(text="❌ لا",  callback_data=no_cb),
-        ]
-    ])
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ نعم", callback_data=yes_cb),
+        InlineKeyboardButton(text="❌ لا",  callback_data=no_cb),
+    ]])
 
 # ─── Parse Inline Buttons from Text ──────────────────────
 def parse_buttons(buttons_text: str) -> InlineKeyboardMarkup | None:
