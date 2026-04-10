@@ -1,11 +1,11 @@
 import asyncio
-import json
+import re
 from datetime import datetime
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from utils.helpers import is_admin, back_button, parse_buttons
+from utils.helpers import is_admin, is_feature_allowed, back_button, parse_buttons
 from database.db import (
     get_active_groups, get_all_templates, get_template,
     add_template, delete_template, log_broadcast,
@@ -15,38 +15,36 @@ from database.db import (
 router = Router()
 
 class BroadcastStates(StatesGroup):
-    waiting_message = State()
-    waiting_template_name = State()
+    waiting_message          = State()
+    waiting_template_name    = State()
     waiting_template_content = State()
     waiting_template_buttons = State()
-    waiting_schedule_template = State()
-    waiting_schedule_time = State()
+    waiting_schedule_time    = State()
     waiting_schedule_interval = State()
-    preview_confirm = State()
 
 PENDING_BROADCAST = {}
 
 # ─── Broadcast Menu ───────────────────────────────────────
 def broadcast_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 إرسال رسالة جديدة", callback_data="new_broadcast")],
-        [InlineKeyboardButton(text="🧩 إرسال من قالب", callback_data="broadcast_from_template")],
-        [InlineKeyboardButton(text="📜 سجل النشر", callback_data="broadcast_log")],
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="main_menu")],
+        [InlineKeyboardButton(text="📢 إرسال رسالة جديدة",   callback_data="new_broadcast")],
+        [InlineKeyboardButton(text="🧩 إرسال من قالب",       callback_data="broadcast_from_template")],
+        [InlineKeyboardButton(text="📜 سجل النشر",           callback_data="broadcast_log")],
+        [InlineKeyboardButton(text="🔙 رجوع",                callback_data="main_menu")],
     ])
 
 @router.callback_query(F.data == "broadcast_menu")
 async def cb_broadcast_menu(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "broadcast"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     await cb.message.edit_text("📢 <b>قائمة النشر:</b>", reply_markup=broadcast_menu_kb(), parse_mode="HTML")
 
 # ─── New Broadcast ────────────────────────────────────────
 @router.callback_query(F.data == "new_broadcast")
 async def cb_new_broadcast(cb: CallbackQuery, state: FSMContext):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "broadcast"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     await state.set_state(BroadcastStates.waiting_message)
     await cb.message.edit_text(
@@ -61,8 +59,7 @@ async def cb_new_broadcast(cb: CallbackQuery, state: FSMContext):
 async def process_broadcast_message(msg: Message, state: FSMContext):
     await state.clear()
     user_id = msg.from_user.id
-    
-    # Parse buttons if any
+
     buttons_markup = None
     text = msg.text or msg.caption or ""
     if "#buttons" in text:
@@ -71,20 +68,18 @@ async def process_broadcast_message(msg: Message, state: FSMContext):
         buttons_markup = parse_buttons(parts[1].strip())
     else:
         clean_text = text
-    
-    # Store pending broadcast
+
     PENDING_BROADCAST[user_id] = {
-        "text": clean_text,
+        "text":    clean_text,
         "buttons": buttons_markup,
-        "photo": msg.photo[-1].file_id if msg.photo else None,
-        "video": msg.video.file_id if msg.video else None,
+        "photo":   msg.photo[-1].file_id if msg.photo else None,
+        "video":   msg.video.file_id if msg.video else None,
     }
-    
-    # Preview
+
     preview_text = f"👁 <b>معاينة الرسالة:</b>\n\n{clean_text}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ إرسال الآن", callback_data="confirm_broadcast")],
-        [InlineKeyboardButton(text="❌ إلغاء", callback_data="broadcast_menu")],
+        [InlineKeyboardButton(text="❌ إلغاء",      callback_data="broadcast_menu")],
     ])
     await msg.answer(preview_text, reply_markup=kb, parse_mode="HTML")
 
@@ -94,23 +89,19 @@ async def cb_confirm_broadcast(cb: CallbackQuery, bot: Bot):
     if user_id not in PENDING_BROADCAST:
         await cb.answer("انتهت صلاحية الرسالة.", show_alert=True)
         return
-    
-    data = PENDING_BROADCAST.pop(user_id)
+
+    data   = PENDING_BROADCAST.pop(user_id)
     groups = await get_active_groups()
-    
     if not groups:
         await cb.answer("لا توجد كروبات نشطة!", show_alert=True)
         return
-    
+
     await cb.message.edit_text(f"⏳ جاري الإرسال لـ {len(groups)} كروب...")
-    
     sent, failed = await send_to_groups(bot, groups, data)
     await log_broadcast("manual", sent, failed)
-    
+
     await cb.message.edit_text(
-        f"✅ <b>اكتمل الإرسال</b>\n"
-        f"• نجح: <b>{sent}</b>\n"
-        f"• فشل: <b>{failed}</b>",
+        f"✅ <b>اكتمل الإرسال</b>\n• نجح: <b>{sent}</b>\n• فشل: <b>{failed}</b>",
         reply_markup=back_button("broadcast_menu"),
         parse_mode="HTML"
     )
@@ -130,14 +121,14 @@ async def send_to_groups(bot: Bot, groups: list, data: dict, delay: float = 0.3)
             sent += 1
         except Exception:
             failed += 1
-        await asyncio.sleep(delay)  # Delay to avoid flood
+        await asyncio.sleep(delay)
     return sent, failed
 
 # ─── Broadcast from Template ──────────────────────────────
 @router.callback_query(F.data == "broadcast_from_template")
 async def cb_broadcast_from_template(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "broadcast"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     templates = await get_all_templates()
     if not templates:
@@ -159,24 +150,25 @@ async def cb_use_template(cb: CallbackQuery, bot: Bot):
     if not tmpl:
         await cb.answer("القالب غير موجود!", show_alert=True)
         return
-    
+
     groups = await get_active_groups()
     if not groups:
         await cb.answer("لا توجد كروبات نشطة!", show_alert=True)
         return
-    
+
     await cb.message.edit_text(f"⏳ جاري إرسال قالب «{name}» لـ {len(groups)} كروب...")
-    
-    buttons_markup = parse_buttons(tmpl[5]) if tmpl[5] else None  # tmpl[5] = buttons column? adjust index
+
+    # FIX: tmpl = (id, name, content, media_path, media_type, buttons)
+    buttons_markup = parse_buttons(tmpl[5]) if tmpl[5] else None
     data = {
-        "text": tmpl[2],
+        "text":    tmpl[2],
         "buttons": buttons_markup,
-        "photo": tmpl[3] if tmpl[4] == "photo" else None,
-        "video": tmpl[3] if tmpl[4] == "video" else None,
+        "photo":   tmpl[3] if tmpl[4] == "photo" else None,
+        "video":   tmpl[3] if tmpl[4] == "video" else None,
     }
     sent, failed = await send_to_groups(bot, groups, data)
     await log_broadcast(name, sent, failed)
-    
+
     await cb.message.edit_text(
         f"✅ <b>اكتمل الإرسال</b>\n• نجح: <b>{sent}</b>\n• فشل: <b>{failed}</b>",
         reply_markup=back_button("broadcast_menu"),
@@ -200,15 +192,15 @@ async def cb_broadcast_log(cb: CallbackQuery):
 def templates_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 عرض القوالب", callback_data="list_templates")],
-        [InlineKeyboardButton(text="➕ إضافة قالب", callback_data="add_template")],
-        [InlineKeyboardButton(text="🗑 حذف قالب", callback_data="delete_template")],
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="main_menu")],
+        [InlineKeyboardButton(text="➕ إضافة قالب",  callback_data="add_template")],
+        [InlineKeyboardButton(text="🗑 حذف قالب",    callback_data="delete_template")],
+        [InlineKeyboardButton(text="🔙 رجوع",        callback_data="main_menu")],
     ])
 
 @router.callback_query(F.data == "templates_menu")
 async def cb_templates_menu(cb: CallbackQuery):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "templates"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     await cb.message.edit_text("🧩 <b>القوالب:</b>", reply_markup=templates_menu_kb(), parse_mode="HTML")
 
@@ -226,8 +218,8 @@ async def cb_list_templates(cb: CallbackQuery):
 
 @router.callback_query(F.data == "add_template")
 async def cb_add_template(cb: CallbackQuery, state: FSMContext):
-    if not await is_admin(cb.from_user.id):
-        await cb.answer("⛔", show_alert=True)
+    if not await is_feature_allowed(cb.from_user.id, "templates"):
+        await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     await state.set_state(BroadcastStates.waiting_template_name)
     await cb.message.edit_text(
@@ -243,8 +235,7 @@ async def process_template_name(msg: Message, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_template_content)
 async def process_template_content(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    content = msg.text or msg.caption or ""
+    content    = msg.text or msg.caption or ""
     media_path = None
     media_type = None
     if msg.photo:
@@ -253,7 +244,7 @@ async def process_template_content(msg: Message, state: FSMContext):
     elif msg.video:
         media_path = msg.video.file_id
         media_type = "video"
-    
+
     await state.update_data(content=content, media_path=media_path, media_type=media_type)
     await state.set_state(BroadcastStates.waiting_template_buttons)
     await msg.answer(
@@ -265,8 +256,15 @@ async def process_template_content(msg: Message, state: FSMContext):
 @router.message(BroadcastStates.waiting_template_buttons)
 async def process_template_buttons(msg: Message, state: FSMContext):
     data = await state.get_data()
-    buttons = None if msg.text.strip().lower() in ["تخطي", "skip"] else msg.text.strip()
-    await add_template(data["template_name"], data["content"], data.get("media_path"), data.get("media_type"))
+    # FIX: حفظ الأزرار فعلياً في قاعدة البيانات
+    buttons_raw = None if msg.text.strip().lower() in ["تخطي", "skip"] else msg.text.strip()
+    await add_template(
+        data["template_name"],
+        data["content"],
+        data.get("media_path"),
+        data.get("media_type"),
+        buttons_raw   # ← كان ناقصاً
+    )
     await state.clear()
     await msg.answer(f"✅ تم حفظ القالب <b>{data['template_name']}</b>", parse_mode="HTML")
 
@@ -301,14 +299,14 @@ async def cb_schedule_menu(cb: CallbackQuery):
         text += f"• <b>{s[1]}</b> | 🕐 {s[2]} | 🔁 {s[3]}د\n"
     if not scheduled:
         text += "لا توجد جدولة نشطة."
-    
+
     buttons = [[InlineKeyboardButton(text="➕ جدولة جديدة", callback_data="add_schedule")]]
     for s in scheduled:
         buttons.append([InlineKeyboardButton(
             text=f"🗑 {s[1]} @ {s[2]}", callback_data=f"del_schedule_{s[0]}"
         )])
     buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="main_menu")])
-    
+
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @router.callback_query(F.data == "add_schedule")
@@ -337,7 +335,6 @@ async def cb_sched_template(cb: CallbackQuery, state: FSMContext):
 @router.message(BroadcastStates.waiting_schedule_time)
 async def process_schedule_time(msg: Message, state: FSMContext):
     time_str = msg.text.strip()
-    import re
     if not re.match(r"^\d{2}:\d{2}$", time_str):
         await msg.answer("❌ صيغة غير صحيحة. أرسل مثل: 14:30")
         return
@@ -358,12 +355,16 @@ async def process_schedule_interval(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
     await add_scheduled(data["sched_template"], data["sched_time"], interval)
-    await msg.answer(
-        f"✅ تم جدولة <b>{data['sched_template']}</b>\n"
-        f"🕐 الوقت: {data['sched_time']}\n"
-        f"🔁 كل: {interval} دقيقة" if interval else f"✅ مرة واحدة عند {data['sched_time']}",
-        parse_mode="HTML"
-    )
+    # FIX: بناء الرسالة بشكل صحيح بدل ternary داخل f-string
+    if interval:
+        text = (
+            f"✅ تم جدولة <b>{data['sched_template']}</b>\n"
+            f"🕐 الوقت: {data['sched_time']}\n"
+            f"🔁 كل: {interval} دقيقة"
+        )
+    else:
+        text = f"✅ مرة واحدة عند {data['sched_time']}"
+    await msg.answer(text, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("del_schedule_"))
 async def cb_del_schedule(cb: CallbackQuery):
