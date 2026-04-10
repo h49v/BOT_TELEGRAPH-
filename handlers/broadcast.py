@@ -17,8 +17,8 @@ router = Router()
 
 class BroadcastStates(StatesGroup):
     waiting_message          = State()
-    waiting_broadcast_count  = State()   # ← جديد: عدد الرسائل للنشر الفوري
-    waiting_broadcast_delay  = State()   # ← جديد: الفاصل الزمني للنشر الفوري
+    waiting_broadcast_count  = State()
+    waiting_broadcast_delay  = State()
     waiting_template_name    = State()
     waiting_template_content = State()
     waiting_template_buttons = State()
@@ -83,7 +83,7 @@ async def process_broadcast_message(msg: Message, state: FSMContext):
     await state.set_state(BroadcastStates.waiting_broadcast_count)
     await msg.answer(
         "📨 <b>كم رسالة تريد ترسل؟</b>\n\n"
-        "أدخل عدد الكروبات (مثال: <code>50</code>)\n"
+        "أدخل العدد (مثال: <code>50</code>)\n"
         "أو أرسل <code>0</code> للإرسال لجميع الكروبات",
         parse_mode="HTML"
     )
@@ -98,8 +98,8 @@ async def process_broadcast_count(msg: Message, state: FSMContext):
     await state.set_state(BroadcastStates.waiting_broadcast_delay)
     await msg.answer(
         "⏱ <b>كم دقيقة بين كل رسالة والثانية؟</b>\n\n"
-        "أدخل الفاصل بالدقائق (مثال: <code>2</code> = دقيقتان)\n"
-        "أو أرسل <code>0</code> لإرسال سريع (30 ثانية افتراضي)",
+        "أدخل الفاصل بالدقائق (مثال: <code>2</code>)\n"
+        "أو أرسل <code>0</code> لإرسال سريع",
         parse_mode="HTML"
     )
 
@@ -108,10 +108,10 @@ async def process_broadcast_delay(msg: Message, state: FSMContext):
     user_id = msg.from_user.id
     try:
         delay_min = float(msg.text.strip())
-        delay_sec = max(delay_min * 60, 5)
+        delay_sec = max(delay_min * 60, 5) if delay_min > 0 else 5
     except ValueError:
         delay_min = 0
-        delay_sec = 30
+        delay_sec = 5
 
     data_state = await state.get_data()
     count = data_state.get("broadcast_count", 0)
@@ -121,7 +121,7 @@ async def process_broadcast_delay(msg: Message, state: FSMContext):
         PENDING_BROADCAST[user_id]["count"] = count
         PENDING_BROADCAST[user_id]["delay"] = delay_sec
 
-    delay_label = f"{msg.text.strip()} دقيقة" if delay_min > 0 else "30 ثانية (سريع)"
+    delay_label = f"{msg.text.strip()} دقيقة" if delay_min > 0 else "سريع"
 
     preview_text = (
         f"👁 <b>معاينة الإعدادات:</b>\n\n"
@@ -148,9 +148,8 @@ async def cb_confirm_broadcast(cb: CallbackQuery, bot: Bot):
         await cb.answer("لا توجد كروبات نشطة!", show_alert=True)
         return
 
-    # تطبيق حد الرسائل والفاصل الزمني
     count = data.get("count", 0)
-    delay = data.get("delay", 0.5)
+    delay = data.get("delay", 5)
     if count and count < len(groups):
         groups = groups[:count]
 
@@ -165,7 +164,7 @@ async def cb_confirm_broadcast(cb: CallbackQuery, bot: Bot):
     )
 
 # ─── Send to Groups ───────────────────────────────────────
-async def send_to_groups(bot: Bot, groups: list, data: dict, delay: float = 0.5) -> tuple[int, int]:
+async def send_to_groups(bot: Bot, groups: list, data: dict, delay: float = 5) -> tuple[int, int]:
     import os
     from database.db import get_session
     from telethon import TelegramClient
@@ -175,7 +174,7 @@ async def send_to_groups(bot: Bot, groups: list, data: dict, delay: float = 0.5)
 
     session_row = await get_session()
     if not session_row:
-        return 0, len(groups)  # كل القروبات فشلت — لا توجد جلسة
+        return 0, len(groups)
 
     api_id   = int(os.environ.get("API_ID", "0"))
     api_hash = os.environ.get("API_HASH", "")
@@ -217,10 +216,7 @@ async def cb_broadcast_from_template(cb: CallbackQuery):
         text=f"🧩 {t[1]}", callback_data=f"use_template_{t[1]}"
     )] for t in templates]
     buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="broadcast_menu")])
-    await cb.message.edit_text(
-        "اختر القالب للإرسال:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
+    await cb.message.edit_text("اختر القالب للإرسال:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @router.callback_query(F.data.startswith("use_template_"))
 async def cb_use_template(cb: CallbackQuery, bot: Bot):
@@ -237,7 +233,6 @@ async def cb_use_template(cb: CallbackQuery, bot: Bot):
 
     await cb.message.edit_text(f"⏳ جاري إرسال قالب «{name}» لـ {len(groups)} كروب...")
 
-    # FIX: tmpl = (id, name, content, media_path, media_type, buttons)
     buttons_markup = parse_buttons(tmpl[5]) if tmpl[5] else None
     data = {
         "text":    tmpl[2],
@@ -301,10 +296,7 @@ async def cb_add_template(cb: CallbackQuery, state: FSMContext):
         await cb.answer("⛔ هذه الخدمة غير متاحة حالياً.", show_alert=True)
         return
     await state.set_state(BroadcastStates.waiting_template_name)
-    await cb.message.edit_text(
-        "أرسل اسم القالب (بدون مسافات):",
-        reply_markup=back_button("templates_menu")
-    )
+    await cb.message.edit_text("أرسل اسم القالب (بدون مسافات):", reply_markup=back_button("templates_menu"))
 
 @router.message(BroadcastStates.waiting_template_name)
 async def process_template_name(msg: Message, state: FSMContext):
@@ -335,14 +327,13 @@ async def process_template_content(msg: Message, state: FSMContext):
 @router.message(BroadcastStates.waiting_template_buttons)
 async def process_template_buttons(msg: Message, state: FSMContext):
     data = await state.get_data()
-    # FIX: حفظ الأزرار فعلياً في قاعدة البيانات
     buttons_raw = None if msg.text.strip().lower() in ["تخطي", "skip"] else msg.text.strip()
     await add_template(
         data["template_name"],
         data["content"],
         data.get("media_path"),
         data.get("media_type"),
-        buttons_raw   # ← كان ناقصاً
+        buttons_raw
     )
     await state.clear()
     await msg.answer(f"✅ تم حفظ القالب <b>{data['template_name']}</b>", parse_mode="HTML")
@@ -376,8 +367,8 @@ async def cb_schedule_menu(cb: CallbackQuery):
     text = "⏰ <b>الجدولة:</b>\n\n"
     for s in scheduled:
         count = s[6] if len(s) > 6 and s[6] else "كل"
-        delay = s[7] if len(s) > 7 and s[7] else 30
-        text += f"• <b>{s[1]}</b> | 🕐 {s[2]} | 📨 {count} رسالة | ⏱ {delay}ث بين كل رسالة\n"
+        delay_min = (s[7] // 60) if len(s) > 7 and s[7] else 0
+        text += f"• <b>{s[1]}</b> | 🕐 {s[2]} | 📨 {count} رسالة | ⏱ {delay_min}د بين كل رسالة\n"
     if not scheduled:
         text += "لا توجد جدولة نشطة."
 
@@ -387,7 +378,6 @@ async def cb_schedule_menu(cb: CallbackQuery):
             text=f"🗑 {s[1]} @ {s[2]}", callback_data=f"del_schedule_{s[0]}"
         )])
     buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data="main_menu")])
-
     await cb.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @router.callback_query(F.data == "add_schedule")
@@ -437,20 +427,20 @@ async def process_schedule_count(msg: Message, state: FSMContext):
     await state.update_data(sched_count=count)
     await state.set_state(BroadcastStates.waiting_schedule_delay)
     await msg.answer(
-        "⏱ كم ثانية بين كل رسالة والثانية؟\n"
-        "مثال: <code>200</code> = 200 ثانية بين كل رسالة",
+        "⏱ كم دقيقة بين كل رسالة والثانية؟\n"
+        "مثال: <code>5</code> = 5 دقائق",
         parse_mode="HTML"
     )
 
 @router.message(BroadcastStates.waiting_schedule_delay)
 async def process_schedule_delay(msg: Message, state: FSMContext):
     try:
-        delay = int(msg.text.strip())
-        if delay < 5:
-            delay = 5  # حد أدنى 5 ثواني
+        delay_min = int(msg.text.strip())
+        if delay_min < 1:
+            delay_min = 1
     except ValueError:
-        delay = 30
-    await state.update_data(sched_delay=delay)
+        delay_min = 1
+    await state.update_data(sched_delay=delay_min * 60)  # تحويل لثواني داخلياً
     await state.set_state(BroadcastStates.waiting_schedule_interval)
     await msg.answer(
         "🔁 أرسل فترة التكرار بالدقائق (0 = مرة واحدة):\n"
@@ -467,17 +457,18 @@ async def process_schedule_interval(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
 
-    count = data.get("sched_count", 0)
-    delay = data.get("sched_delay", 30)
+    count     = data.get("sched_count", 0)
+    delay_sec = data.get("sched_delay", 60)
+    delay_min = delay_sec // 60
 
-    await add_scheduled(data["sched_template"], data["sched_time"], interval, count, delay)
+    await add_scheduled(data["sched_template"], data["sched_time"], interval, count, delay_sec)
 
     text = (
         f"✅ <b>تم إنشاء الجدولة</b>\n"
         f"📋 القالب: <b>{data['sched_template']}</b>\n"
         f"🕐 الوقت: <b>{data['sched_time']}</b>\n"
         f"📨 عدد الرسائل: <b>{'كل القروبات' if count == 0 else count}</b>\n"
-        f"⏱ الفاصل: <b>{delay} ثانية</b>\n"
+        f"⏱ الفاصل: <b>{delay_min} دقيقة</b>\n"
         f"🔁 التكرار: <b>{'كل ' + str(interval) + ' دقيقة' if interval else 'مرة واحدة'}</b>"
     )
     await msg.answer(text, parse_mode="HTML")
