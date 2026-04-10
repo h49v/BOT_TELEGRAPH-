@@ -130,30 +130,22 @@ async def cb_confirm_del_reply(cb: CallbackQuery):
 async def handle_private_message(msg: Message, bot: Bot):
     user_id = msg.from_user.id
     
-    # Skip if admin
     if await is_admin(user_id):
         return
     
-    # Check blacklist
     if await is_blacklisted(user_id):
         await msg.answer("⛔ أنت محظور من استخدام هذا البوت.")
         return
     
     text = msg.text or msg.caption or ""
     
-    # Check auto replies
-    reply_sent = False
     replies = await get_all_replies()
     for r in replies:
-        if r[4] and r[1].lower() in text.lower():  # active and keyword found
-            buttons_markup = None
-            if r[3]:
-                buttons_markup = parse_buttons(r[3])
+        if r[4] and r[1].lower() in text.lower():
+            buttons_markup = parse_buttons(r[3]) if r[3] else None
             await msg.answer(r[2], reply_markup=buttons_markup, parse_mode="HTML")
-            reply_sent = True
             break
     
-    # Forward to admin group
     if ADMIN_GROUP_ID:
         username = f"@{msg.from_user.username}" if msg.from_user.username else "بدون يوزر"
         header = (
@@ -162,13 +154,24 @@ async def handle_private_message(msg: Message, bot: Bot):
             f"🆔 <code>{user_id}</code>"
         )
         view_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(
-                text="👁 مشاهدة المحادثة",
-                url=f"tg://user?id={user_id}"
-            )
+            InlineKeyboardButton(text="👁 مشاهدة المحادثة", url=f"tg://user?id={user_id}")
         ]])
         try:
             await bot.send_message(ADMIN_GROUP_ID, header, parse_mode="HTML", reply_markup=view_kb)
             await bot.forward_message(ADMIN_GROUP_ID, msg.chat.id, msg.message_id)
         except Exception:
             pass
+
+# ─── Auto Reply in Groups ─────────────────────────────────
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def handle_group_message(msg: Message, bot: Bot):
+    text = msg.text or msg.caption or ""
+    if not text:
+        return
+    
+    replies = await get_all_replies()
+    for r in replies:
+        if r[4] and r[1].lower() in text.lower():
+            buttons_markup = parse_buttons(r[3]) if r[3] else None
+            await msg.answer(r[2], reply_markup=buttons_markup, parse_mode="HTML")
+            break
