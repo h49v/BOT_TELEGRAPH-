@@ -31,7 +31,7 @@ async def main():
     asyncio.create_task(run_scheduler(bot))
 
     logger.info("🤖 CyberBand Bot starting...")
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"])
 
 if __name__ == "__main__":
     asyncio.run(main())
