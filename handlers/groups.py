@@ -75,9 +75,10 @@ async def cb_toggle_group(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id):
         await cb.answer("⛔", show_alert=True)
         return
-    parts    = cb.data.split("_")
-    group_id = int(parts[2])
-    active   = int(parts[3])
+    # FIX: rsplit من اليمين لتجنب كسر group_id السالب
+    rest     = cb.data[len("toggle_group_"):]   # "-1001234567890_1"
+    group_id = int(rest.rsplit("_", 1)[0])
+    active   = int(rest.rsplit("_", 1)[1])
     await toggle_group(group_id, active)
     status = "✅ مفعّل" if active else "⛔ معطّل"
     await cb.answer(f"تم تغيير الحالة → {status}")
@@ -182,7 +183,7 @@ async def cb_confirm_remove(cb: CallbackQuery):
     if not await is_admin(cb.from_user.id):
         await cb.answer("⛔", show_alert=True)
         return
-    group_id = int(cb.data.split("_")[-1])
+    group_id = int(cb.data[len("confirm_remove_"):])
     await remove_group(group_id)
     await cb.answer("✅ تم الحذف")
 
@@ -204,4 +205,4 @@ async def cb_confirm_remove(cb: CallbackQuery):
         "🗑 <b>اختر الكروب لحذفه:</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
-    )
+        )
