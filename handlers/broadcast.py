@@ -16,6 +16,8 @@ router = Router()
 
 class BroadcastStates(StatesGroup):
     waiting_message          = State()
+    waiting_broadcast_count  = State()   # ← جديد: عدد الرسائل للنشر الفوري
+    waiting_broadcast_delay  = State()   # ← جديد: الفاصل الزمني للنشر الفوري
     waiting_template_name    = State()
     waiting_template_content = State()
     waiting_template_buttons = State()
@@ -59,7 +61,6 @@ async def cb_new_broadcast(cb: CallbackQuery, state: FSMContext):
 
 @router.message(BroadcastStates.waiting_message)
 async def process_broadcast_message(msg: Message, state: FSMContext):
-    await state.clear()
     user_id = msg.from_user.id
 
     buttons_markup = None
@@ -78,7 +79,57 @@ async def process_broadcast_message(msg: Message, state: FSMContext):
         "video":   msg.video.file_id if msg.video else None,
     }
 
-    preview_text = f"👁 <b>معاينة الرسالة:</b>\n\n{clean_text}"
+    await state.set_state(BroadcastStates.waiting_broadcast_count)
+    await msg.answer(
+        "📨 <b>كم رسالة تريد ترسل؟</b>\n\n"
+        "أدخل عدد الكروبات (مثال: <code>50</code>)\n"
+        "أو أرسل <code>0</code> للإرسال لجميع الكروبات",
+        parse_mode="HTML"
+    )
+
+@router.message(BroadcastStates.waiting_broadcast_count)
+async def process_broadcast_count(msg: Message, state: FSMContext):
+    try:
+        count = int(msg.text.strip())
+    except ValueError:
+        count = 0
+    await state.update_data(broadcast_count=count)
+    await state.set_state(BroadcastStates.waiting_broadcast_delay)
+    await msg.answer(
+        "⏱ <b>كم دقيقة بين كل رسالة والثانية؟</b>\n\n"
+        "أدخل الفاصل بالدقائق (مثال: <code>2</code> = دقيقتان)\n"
+        "أو أرسل <code>0</code> لإرسال سريع (30 ثانية افتراضي)",
+        parse_mode="HTML"
+    )
+
+@router.message(BroadcastStates.waiting_broadcast_delay)
+async def process_broadcast_delay(msg: Message, state: FSMContext):
+    user_id = msg.from_user.id
+    try:
+        delay_min = float(msg.text.strip())
+        delay_sec = max(delay_min * 60, 5)
+    except ValueError:
+        delay_min = 0
+        delay_sec = 30
+
+    # اقرأ البيانات قبل clear
+    data_state = await state.get_data()
+    count = data_state.get("broadcast_count", 0)
+    await state.clear()
+
+    # خزّن في PENDING_BROADCAST
+    if user_id in PENDING_BROADCAST:
+        PENDING_BROADCAST[user_id]["count"] = count
+        PENDING_BROADCAST[user_id]["delay"] = delay_sec
+
+    delay_label = f"{msg.text.strip()} دقيقة" if delay_min > 0 else "30 ثانية (سريع)"
+
+    preview_text = (
+        f"👁 <b>معاينة الإعدادات:</b>\n\n"
+        f"📨 عدد الرسائل: <b>{'كل الكروبات' if count == 0 else count}</b>\n"
+        f"⏱ الفاصل: <b>{delay_label}</b>\n\n"
+        f"📝 النص:\n{PENDING_BROADCAST[user_id]['text']}"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ إرسال الآن", callback_data="confirm_broadcast")],
         [InlineKeyboardButton(text="❌ إلغاء",      callback_data="broadcast_menu")],
@@ -98,8 +149,14 @@ async def cb_confirm_broadcast(cb: CallbackQuery, bot: Bot):
         await cb.answer("لا توجد كروبات نشطة!", show_alert=True)
         return
 
+    # تطبيق حد الرسائل والفاصل الزمني
+    count = data.get("count", 0)
+    delay = data.get("delay", 0.5)
+    if count and count < len(groups):
+        groups = groups[:count]
+
     await cb.message.edit_text(f"⏳ جاري الإرسال لـ {len(groups)} كروب...")
-    sent, failed = await send_to_groups(bot, groups, data)
+    sent, failed = await send_to_groups(bot, groups, data, delay=delay)
     await log_broadcast("manual", sent, failed)
 
     await cb.message.edit_text(
