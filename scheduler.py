@@ -61,7 +61,13 @@ async def run_scheduler(bot: Bot):
             scheduled = await get_scheduled()
 
             for s in scheduled:
-                sid, template_name, schedule_time, repeat_interval, active = s[0], s[1], s[2], s[3], s[4]
+                sid            = s[0]
+                template_name  = s[1]
+                schedule_time  = s[2]
+                repeat_interval = s[3]
+                # s[5] = msg_count, s[6] = msg_delay
+                msg_count = s[5] if len(s) > 5 and s[5] else 0
+                msg_delay = s[6] if len(s) > 6 and s[6] else 30
 
                 if schedule_time != now:
                     continue
@@ -78,16 +84,21 @@ async def run_scheduler(bot: Bot):
                     logger.warning("No active groups for scheduled broadcast")
                     continue
 
+                # تطبيق حد الرسائل
+                if msg_count and msg_count < len(groups):
+                    groups = groups[:msg_count]
+
                 buttons_markup = parse_buttons(tmpl[5]) if len(tmpl) > 5 and tmpl[5] else None
                 data = {
-                    "text": tmpl[2],
+                    "text":    tmpl[2],
                     "buttons": buttons_markup,
-                    "photo": tmpl[3] if tmpl[4] == "photo" else None,
-                    "video": tmpl[3] if tmpl[4] == "video" else None,
+                    "photo":   tmpl[3] if tmpl[4] == "photo" else None,
+                    "video":   tmpl[3] if tmpl[4] == "video" else None,
                 }
 
-                sent, failed = await send_to_groups(bot, groups, data)
+                sent, failed = await send_to_groups(bot, groups, data, delay=msg_delay)
                 await log_broadcast(template_name, sent, failed)
+                logger.info(f"✅ Scheduled broadcast done: sent={sent} failed={failed}")
                 logger.info(f"✅ Scheduled broadcast done: sent={sent} failed={failed}")
 
                 # إذا مو متكرر احذفه
